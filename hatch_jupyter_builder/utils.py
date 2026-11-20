@@ -248,6 +248,10 @@ def should_skip(skip_if_exists: Any) -> bool:
     return all(Path(p).exists() for p in skip_if_exists)
 
 
+# The ID that pre-commit writes in its own hooks. `pre-commit install` replaces
+# a hook that contains it, instead of keeping it as a legacy hook to run first.
+_PRE_COMMIT_HOOK_ID = "138fd403232d2ddd5efb44317e38bf03"
+
 # Environment variables that make git use a repository other than the one
 # found from the current directory.
 _GIT_REPO_ENV_VARS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"})
@@ -294,12 +298,23 @@ def _get_git_hooks_dir() -> Path | None:
 
 def install_pre_commit_hook() -> None:
     """Install a pre-commit hook."""
+    # Same logic as pre-commit's own hook: the Python that ran the build may be
+    # gone when the hook runs, as when an installer builds in a temporary
+    # environment, so fall back to pre-commit on PATH.
     data = f"""#!/usr/bin/env bash
-INSTALL_PYTHON={sys.executable}
+# ID: {_PRE_COMMIT_HOOK_ID}
+INSTALL_PYTHON={shlex.quote(sys.executable)}
 ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARGS+=(--hook-dir "$HERE" -- "$@")
-exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
+if [ -x "$INSTALL_PYTHON" ]; then
+    exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
+elif command -v pre-commit > /dev/null; then
+    exec pre-commit "${{ARGS[@]}}"
+else
+    echo '`pre-commit` not found.  Did you forget to activate your environment?' 1>&2
+    exit 1
+fi
 """
     log = _get_log()
     hooks_dir = _get_git_hooks_dir()
@@ -311,7 +326,7 @@ exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
     path = hooks_dir / "pre-commit"
     if not path.exists():
         log.info("Writing pre-commit hook")
-        with path.open("w") as fid:
+        with path.open("w", newline="\n") as fid:
             fid.write(data)
     else:
         log.warning("Refusing to overwrite pre-commit hook")

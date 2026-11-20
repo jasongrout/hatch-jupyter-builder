@@ -79,6 +79,8 @@ This can be used when build artifacts are optional for local development.
 The optional `install-pre-commit-hook` boolean causes a `pre-commit` hook to be installed during an editable install.
 The hook is written to the repository's hooks directory, which a linked worktree (`git worktree add`) shares with the main working tree.
 An existing `pre-commit` hook is not overwritten, and `core.hooksPath` is not followed.
+If the Python that ran the build no longer exists when the hook runs, as when the installer builds in a temporary environment (for example uv), the hook runs `pre-commit` from `PATH`.
+`pre-commit install` replaces the hook with its own.
 
 ## Npm Builder Function
 

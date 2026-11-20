@@ -110,6 +110,80 @@ def test_install_pre_commit_hook_git_repo(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_install_pre_commit_hook_existing(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _git("init", str(repo), cwd=tmp_path)
+    monkeypatch.chdir(repo)
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("custom hook")
+    utils.install_pre_commit_hook()
+    assert hook.read_text() == "custom hook"
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_install_pre_commit_hook_subdirectory(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _git("init", str(repo), cwd=tmp_path)
+    (repo / "package").mkdir()
+    monkeypatch.chdir(repo / "package")
+    utils.install_pre_commit_hook()
+    assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_install_pre_commit_hook_marks_hook_as_pre_commit(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    os.makedirs(".git/hooks")
+    utils.install_pre_commit_hook()
+    # `pre-commit install` replaces hooks that contain this ID instead of chaining them.
+    assert "138fd403232d2ddd5efb44317e38bf03" in Path(".git/hooks/pre-commit").read_text()
+
+
+def _fake_executable(directory, name):
+    directory.mkdir(parents=True, exist_ok=True)
+    exe = directory / name
+    exe.write_text(f'#!/bin/sh\necho "{name} $*"\n')
+    exe.chmod(0o755)
+    return exe
+
+
+def _install_and_run_hook(tmp_path, monkeypatch, python, path_dirs=()):
+    monkeypatch.setattr(sys, "executable", str(python))
+    repo = tmp_path / "repo"
+    (repo / ".git" / "hooks").mkdir(parents=True)
+    monkeypatch.chdir(repo)
+    utils.install_pre_commit_hook()
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([*map(str, path_dirs), env["PATH"]])
+    return subprocess.run(
+        [str(repo / ".git" / "hooks" / "pre-commit")],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the hook with bash")
+def test_install_pre_commit_hook_runs_install_python(tmp_path, monkeypatch):
+    # The path to the Python is quoted in the hook.
+    python = _fake_executable(tmp_path / "env with space" / "bin", "python")
+    result = _install_and_run_hook(tmp_path, monkeypatch, python)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("python -m pre_commit hook-impl")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="runs the hook with bash")
+def test_install_pre_commit_hook_falls_back_to_path(tmp_path, monkeypatch):
+    # E.g. uv builds in a temporary environment that is deleted after the build.
+    python = tmp_path / "deleted-env" / "bin" / "python"
+    bin_dir = tmp_path / "bin"
+    _fake_executable(bin_dir, "pre-commit")
+    result = _install_and_run_hook(tmp_path, monkeypatch, python, [bin_dir])
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("pre-commit hook-impl")
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
 def test_install_pre_commit_hook_worktree(tmp_path, monkeypatch):
     # In a linked worktree, .git is a file and hooks live in the main repository.
     repo = tmp_path / "repo"
