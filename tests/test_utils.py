@@ -79,18 +79,20 @@ def test_install_pre_commit_hook(tmp_path):
     assert os.path.exists(".git/hooks/pre-commit")
 
 
+@pytest.fixture(autouse=True)
+def git_home(tmp_path_factory, monkeypatch):
+    """Keep the user's and the system's git config (e.g. core.hooksPath) out of the tests."""
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    return home
+
+
 def _git(*args, cwd):
     subprocess.run(
-        [
-            "git",
-            "-c",
-            "user.name=test",
-            "-c",
-            "user.email=test@example.com",
-            "-c",
-            "commit.gpgsign=false",
-            *args,
-        ],
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -118,6 +120,22 @@ def test_install_pre_commit_hook_existing(tmp_path, monkeypatch):
     hook.write_text("custom hook")
     utils.install_pre_commit_hook()
     assert hook.read_text() == "custom hook"
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+@pytest.mark.parametrize("scope", ["local", "global"])
+def test_install_pre_commit_hook_hooks_path(tmp_path, monkeypatch, caplog, git_home, scope):
+    # Like `pre-commit install`, no hook is installed when core.hooksPath is set.
+    repo = tmp_path / "repo"
+    hooks_path = tmp_path / "custom-hooks"
+    _git("init", str(repo), cwd=tmp_path)
+    _git("config", f"--{scope}", "core.hooksPath", str(hooks_path), cwd=repo)
+    assert (git_home / ".gitconfig").exists() == (scope == "global")
+    monkeypatch.chdir(repo)
+    utils.install_pre_commit_hook()
+    assert not hooks_path.exists()
+    assert not (repo / ".git" / "hooks" / "pre-commit").exists()
+    assert "core.hooksPath is set" in caplog.text
 
 
 @pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
@@ -219,9 +237,11 @@ def test_install_pre_commit_hook_ignores_git_dir(tmp_path, monkeypatch):
     assert not (other / ".git" / "hooks" / "pre-commit").exists()
 
 
-def _git_output_unusable_path(*args, **kwargs):
+def _git_output_unusable_path(cmd, **kwargs):
     # E.g. Cygwin git called from a native Windows Python.
-    return "/cygdrive/c/does-not-exist\n.git\n"
+    if "rev-parse" in cmd:
+        return "/cygdrive/c/does-not-exist\n.git\n"
+    raise subprocess.CalledProcessError(1, cmd)
 
 
 def _git_not_executable(*args, **kwargs):
