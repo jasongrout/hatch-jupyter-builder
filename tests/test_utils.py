@@ -1,5 +1,7 @@
 import os
 import shlex
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -75,3 +77,46 @@ def test_install_pre_commit_hook(tmp_path):
     os.makedirs(".git/hooks")
     utils.install_pre_commit_hook()
     assert os.path.exists(".git/hooks/pre-commit")
+
+
+def _git(*args, cwd):
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_install_pre_commit_hook_git_repo(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    _git("init", str(repo), cwd=tmp_path)
+    monkeypatch.chdir(repo)
+    utils.install_pre_commit_hook()
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    assert hook.exists()
+    if sys.platform != "win32":
+        assert os.access(hook, os.X_OK)
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_install_pre_commit_hook_worktree(tmp_path, monkeypatch):
+    # In a linked worktree, .git is a file and hooks live in the main repository.
+    repo = tmp_path / "repo"
+    worktree = tmp_path / "worktree"
+    _git("init", str(repo), cwd=tmp_path)
+    _git("commit", "--allow-empty", "-m", "initial", cwd=repo)
+    _git("worktree", "add", str(worktree), cwd=repo)
+    assert (worktree / ".git").is_file()
+    monkeypatch.chdir(worktree)
+    utils.install_pre_commit_hook()
+    assert (repo / ".git" / "hooks" / "pre-commit").exists()
+
+
+def test_install_pre_commit_hook_broken_git_file(tmp_path, monkeypatch):
+    # A .git file that git cannot use must not raise.
+    monkeypatch.chdir(tmp_path)
+    Path(".git").write_text("gitdir: does-not-exist\n")
+    utils.install_pre_commit_hook()
+    assert not (tmp_path / "does-not-exist").exists()

@@ -248,6 +248,40 @@ def should_skip(skip_if_exists: Any) -> bool:
     return all(Path(p).exists() for p in skip_if_exists)
 
 
+def _get_git_hooks_dir() -> Path | None:
+    """Get the hooks directory of the git repository rooted at the current directory.
+
+    In a linked worktree (``git worktree add``) or a submodule, ``.git`` is a
+    file pointing at the real git directory, and the hooks directory is in the
+    repository's common git directory. Ask git for it rather than assuming
+    ``.git/hooks``. ``core.hooksPath`` is deliberately not followed, since it
+    may point at a directory shared by other repositories.
+
+    Returns None if the current directory is not the top level of a git
+    working tree.
+    """
+    if not Path(".git").exists():
+        return None
+    git = which("git")
+    if git:
+        try:
+            toplevel, common_dir = subprocess.check_output(
+                [git, "rev-parse", "--show-toplevel", "--git-common-dir"],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            ).splitlines()
+        except (subprocess.CalledProcessError, ValueError):
+            pass
+        else:
+            # If ./.git is not a valid git directory, git may have found an
+            # enclosing repository instead; ignore it in that case.
+            if Path(toplevel).samefile("."):
+                return Path(common_dir) / "hooks"
+    if Path(".git").is_dir():
+        return Path(".git/hooks")
+    return None
+
+
 def install_pre_commit_hook() -> None:
     """Install a pre-commit hook."""
     data = f"""#!/usr/bin/env bash
@@ -258,11 +292,13 @@ ARGS+=(--hook-dir "$HERE" -- "$@")
 exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
 """
     log = _get_log()
-    if not Path(".git").exists():
+    hooks_dir = _get_git_hooks_dir()
+    if hooks_dir is None:
         log.warning("Refusing to install pre-commit hook since this is not a git repository")
         return
 
-    path = Path(".git/hooks/pre-commit")
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    path = hooks_dir / "pre-commit"
     if not path.exists():
         log.info("Writing pre-commit hook")
         with path.open("w") as fid:
