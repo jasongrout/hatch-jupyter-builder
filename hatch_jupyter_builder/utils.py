@@ -248,6 +248,11 @@ def should_skip(skip_if_exists: Any) -> bool:
     return all(Path(p).exists() for p in skip_if_exists)
 
 
+# Environment variables that make git use a repository other than the one
+# found from the current directory.
+_GIT_REPO_ENV_VARS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"})
+
+
 def _get_git_hooks_dir() -> Path | None:
     """Get the hooks directory of the git repository rooted at the current directory.
 
@@ -264,19 +269,24 @@ def _get_git_hooks_dir() -> Path | None:
         return None
     git = which("git")
     if git:
+        # Make git find the repository from the current directory, rather than
+        # from variables such as GIT_DIR, which are set e.g. inside git hooks.
+        env = {k: v for k, v in os.environ.items() if k not in _GIT_REPO_ENV_VARS}
         try:
             toplevel, common_dir = subprocess.check_output(
                 [git, "rev-parse", "--show-toplevel", "--git-common-dir"],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                env=env,
             ).splitlines()
-        except (subprocess.CalledProcessError, ValueError):
-            pass
-        else:
             # If ./.git is not a valid git directory, git may have found an
             # enclosing repository instead; ignore it in that case.
             if Path(toplevel).samefile("."):
                 return Path(common_dir) / "hooks"
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            # OSError: git could not be run, or it printed a path this Python
+            # cannot open (e.g. Cygwin git with a native Windows Python).
+            pass
     if Path(".git").is_dir():
         return Path(".git/hooks")
     return None

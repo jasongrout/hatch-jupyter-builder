@@ -81,7 +81,16 @@ def test_install_pre_commit_hook(tmp_path):
 
 def _git(*args, cwd):
     subprocess.run(
-        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", *args],
+        [
+            "git",
+            "-c",
+            "user.name=test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            *args,
+        ],
         cwd=cwd,
         check=True,
         capture_output=True,
@@ -120,3 +129,37 @@ def test_install_pre_commit_hook_broken_git_file(tmp_path, monkeypatch):
     Path(".git").write_text("gitdir: does-not-exist\n")
     utils.install_pre_commit_hook()
     assert not (tmp_path / "does-not-exist").exists()
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="git is not installed")
+def test_install_pre_commit_hook_ignores_git_dir(tmp_path, monkeypatch):
+    # GIT_DIR (set e.g. inside git hooks) must not redirect the hook to another repository.
+    repo = tmp_path / "repo"
+    other = tmp_path / "other"
+    _git("init", str(repo), cwd=tmp_path)
+    _git("init", str(other), cwd=tmp_path)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.chdir(repo)
+    utils.install_pre_commit_hook()
+    assert (repo / ".git" / "hooks" / "pre-commit").exists()
+    assert not (other / ".git" / "hooks" / "pre-commit").exists()
+
+
+def _git_output_unusable_path(*args, **kwargs):
+    # E.g. Cygwin git called from a native Windows Python.
+    return "/cygdrive/c/does-not-exist\n.git\n"
+
+
+def _git_not_executable(*args, **kwargs):
+    raise PermissionError(13, "Permission denied")
+
+
+@pytest.mark.parametrize("check_output", [_git_output_unusable_path, _git_not_executable])
+def test_install_pre_commit_hook_unusable_git(tmp_path, monkeypatch, check_output):
+    # Problems running git fall back to .git/hooks instead of raising.
+    monkeypatch.chdir(tmp_path)
+    os.makedirs(".git/hooks")
+    monkeypatch.setattr(utils, "which", lambda _: "git")
+    monkeypatch.setattr(utils.subprocess, "check_output", check_output)
+    utils.install_pre_commit_hook()
+    assert Path(".git/hooks/pre-commit").exists()
