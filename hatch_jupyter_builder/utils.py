@@ -248,24 +248,111 @@ def should_skip(skip_if_exists: Any) -> bool:
     return all(Path(p).exists() for p in skip_if_exists)
 
 
+# The ID that pre-commit writes in its own hooks. `pre-commit install` replaces
+# a hook that contains it, instead of keeping it as a legacy hook to run first.
+_PRE_COMMIT_HOOK_ID = "138fd403232d2ddd5efb44317e38bf03"
+
+# Environment variables that make git use a repository other than the one
+# found from the current directory.
+_GIT_REPO_ENV_VARS = frozenset({"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"})
+
+
+def _run_git(*args: str) -> list[str] | None:
+    """Run git in the current directory and return the lines of its output.
+
+    Returns None if git is not installed, cannot be run, or fails.
+    """
+    git = which("git")
+    if not git:
+        return None
+    # Make git find the repository from the current directory, rather than
+    # from variables such as GIT_DIR, which are set e.g. inside git hooks.
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_REPO_ENV_VARS}
+    try:
+        output = subprocess.check_output(
+            [git, *args], stderr=subprocess.DEVNULL, text=True, env=env
+        )
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        # ValueError: the output could not be decoded.
+        return None
+    return output.splitlines()
+
+
+def _get_git_hooks_dir() -> Path | None:
+    """Get the hooks directory of the git repository rooted at the current directory.
+
+    In a linked worktree (``git worktree add``) or a submodule, ``.git`` is a
+    file pointing at the real git directory, and the hooks directory is in the
+    repository's common git directory. Ask git for it rather than assuming
+    ``.git/hooks``.
+
+    Returns None if the current directory is not the top level of a git
+    working tree.
+    """
+    if not Path(".git").exists():
+        return None
+    output = _run_git("rev-parse", "--show-toplevel", "--git-common-dir")
+    if output is not None and len(output) == 2:
+        toplevel, common_dir = output
+        try:
+            # If ./.git is not a valid git directory, git may have found an
+            # enclosing repository instead; ignore it in that case.
+            if Path(toplevel).samefile("."):
+                return Path(common_dir) / "hooks"
+        except OSError:
+            # git printed a path this Python cannot open (e.g. Cygwin git
+            # with a native Windows Python).
+            pass
+    if Path(".git").is_dir():
+        return Path(".git/hooks")
+    return None
+
+
 def install_pre_commit_hook() -> None:
-    """Install a pre-commit hook."""
+    """Install a pre-commit hook.
+
+    The hook and where it is installed follow ``pre-commit install``.
+    """
+    # Same logic as pre-commit's own hook: the Python that ran the build may be
+    # gone when the hook runs, as when an installer builds in a temporary
+    # environment, so fall back to pre-commit on PATH.
     data = f"""#!/usr/bin/env bash
-INSTALL_PYTHON={sys.executable}
+# ID: {_PRE_COMMIT_HOOK_ID}
+INSTALL_PYTHON={shlex.quote(sys.executable)}
 ARGS=(hook-impl --config=.pre-commit-config.yaml --hook-type=pre-commit)
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARGS+=(--hook-dir "$HERE" -- "$@")
-exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
+if [ -x "$INSTALL_PYTHON" ]; then
+    exec "$INSTALL_PYTHON" -m pre_commit "${{ARGS[@]}}"
+elif command -v pre-commit > /dev/null; then
+    exec pre-commit "${{ARGS[@]}}"
+else
+    echo '`pre-commit` not found.  Did you forget to activate your environment?' 1>&2
+    exit 1
+fi
 """
     log = _get_log()
-    if not Path(".git").exists():
+    hooks_dir = _get_git_hooks_dir()
+    if hooks_dir is None:
         log.warning("Refusing to install pre-commit hook since this is not a git repository")
         return
 
-    path = Path(".git/hooks/pre-commit")
+    # Like `pre-commit install`, leave hooks to the user when core.hooksPath is
+    # set: git does not run hooks from the repository's hooks directory then,
+    # and core.hooksPath is often set globally, so a hook written there would
+    # run in every repository, and fail in those without a pre-commit config.
+    if _run_git("config", "core.hooksPath"):
+        log.warning(
+            "Refusing to install pre-commit hook since core.hooksPath is set; "
+            "run pre-commit from the hooks in that directory instead"
+        )
+        return
+
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    path = hooks_dir / "pre-commit"
     if not path.exists():
         log.info("Writing pre-commit hook")
-        with path.open("w") as fid:
+        with path.open("w", newline="\n") as fid:
             fid.write(data)
     else:
         log.warning("Refusing to overwrite pre-commit hook")
